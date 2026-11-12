@@ -1,0 +1,11 @@
+This entry is derived from the make.fun house baseline for the competition
+pumpfun-top5-forecast-01 (starter/main.ts in the competition kit).
+
+That baseline is MIT licensed, Copyright (c) 2026 the make.fun team. See LICENSE.
+The retained pieces are the program's input and output paths (MAKEFUN_INPUT_DIR /
+MAKEFUN_OUTPUT_DIR, otherwise /input and /output), the definition of a place's
+size as log10(market cap in lamports) - 9, and the Numerical Recipes erfc
+approximation used to integrate a normal across the size bins.
+
+The coin features, the horizon-dependent Plackett-Luce place probabilities, and
+the drifted fat-tailed size mixture are original to this repository.

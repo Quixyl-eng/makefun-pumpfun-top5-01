@@ -509,6 +509,7 @@ function anchorLogCap(history: Mark[]): number {
  * Mean, sd, tail weight and right-jump weight of log10(cap in SOL) at one horizon.
  * The slope uses the last hour of marks. Under 2.5 hours it keeps a shrinking
  * share of that pace, which is the practice window. Longer horizons saturate.
+ * The final reads sit 7 to 13 hours out, so that pace is not compounded.
  */
 function sizeMeanSd(series: Array<{ t: number; logCap: number }>, horizonHours: number, anchor: number): { mean: number; sd: number; wide: number; jump: number } {
   if (series.length === 0) return { mean: anchor, sd: 0.5, wide: 0.4, jump: 0.25 };

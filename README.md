@@ -27,8 +27,8 @@ Every coin the snapshots rank gets a strength and a half-life from the fields th
 
 The history has no holder counts. Quote reserves and venue are the stand-in for holder growth and curve progress.
 
-Hours from the last snapshot to each answer read come from `task.json`, not from constants. A coin's weight decays with its own half-life over that gap, so a short rehearsal and the 7-to-13-hour final are not the same forecast. At each read the top places are a Plackett-Luce draw against one outsider bucket: coins launched after the history ends, and coins the snapshots never ranked. The bucket is not removed when it is drawn. The file reports the average of that draw over the seven reads.
+Hours from the last snapshot to each answer read come from `task.json`, not from constants. A coin's weight decays with its own half-life over that gap, so a short rehearsal and the 7-to-13-hour final are not the same forecast. At each read the top places are a Plackett-Luce draw against one outsider bucket: coins launched after the history ends, and coins the snapshots never ranked. The bucket is not removed when it is drawn. The file reports the average of that draw over the seven reads. Each place also names, at probability 0, recent chart coins that are not a real top-5 threat. Naming them removes them from the unnamed share, so that share is left for coins launched after the history ends.
 
-Size bins are a mixture of two normals in log10 of the cap in SOL. The center is that rank's recent level plus a drift fit on the last hour of marks and shrunk toward zero. The spread grows with the horizon, and a wider component keeps a miss off the scoring floor. A lower place is not given a higher mean than the place above it at the same read.
+Size bins are a mixture of two normals in log10 of the cap in SOL. The center is that rank's latest level plus a drift fit on the last 45 minutes, and the drift saturates instead of running for the whole horizon. The wide component gets heavier as the horizon grows. A lower place is not given a higher mean than the place above it at the same read.
 
 Ties break by the mint's 32 bytes, ascending.

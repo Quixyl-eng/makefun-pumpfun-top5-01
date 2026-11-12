@@ -103,7 +103,8 @@ if (candidates.length < places) {
 if (candidates.length < places) throw new Error(`the history names ${candidates.length} coins, fewer than the ${places} places`);
 
 const allocated = allocatePlackett(candidates, horizons, places);
-const probabilities = probabilityRows(candidates, allocated.p, places);
+const extras = rankedFeats.filter((f) => !candidates.some((c) => c.mint === f.mint));
+const probabilities = probabilityRows(candidates, allocated.p, places, extras);
 const top5 = pickTop(candidates, allocated.p, places);
 const sizes = sizeRows(marks, edges, horizons, places);
 
@@ -367,7 +368,12 @@ function toMicro(p: number): number {
   return Math.max(0, Math.floor(p * MICRO + 1e-6));
 }
 
-function probabilityRows(list: Feat[], p: number[][], nPlaces: number): Array<{ mint: string; place: number; p: number }> {
+function probabilityRows(
+  list: Feat[],
+  p: number[][],
+  nPlaces: number,
+  extras: Feat[],
+): Array<{ mint: string; place: number; p: number }> {
   const rows: Array<{ mint: string; place: number; micro: number }> = [];
   for (let k = 0; k < nPlaces; k++) {
     const chosen: Array<{ mint: string; micro: number }> = [];
@@ -378,11 +384,25 @@ function probabilityRows(list: Feat[], p: number[][], nPlaces: number): Array<{ 
     chosen.sort((a, b) => b.micro - a.micro || compareMint(a.mint, b.mint));
     let sum = 0;
     const kept: Array<{ mint: string; micro: number }> = [];
+    const named = new Set<string>();
     for (const row of chosen) {
       if (kept.length === 100) break;
       if (sum + row.micro > MICRO) continue;
       kept.push(row);
+      named.add(row.mint);
       sum += row.micro;
+    }
+    // A p of 0 still names the coin, so it does not share the unnamed mass.
+    // That mass is what scores a coin launched after the history ends. Spend the
+    // spare name slots on coins that are on the recent chart but are not a real
+    // top-5 threat, and leave the residue for newcomers.
+    const zeros = extras
+      .filter((f) => !named.has(f.mint) && (f.rank > 8 || f.collapsed || f.staleHours > 1.5))
+      .sort((a, b) => a.rank - b.rank || compareMint(a.mint, b.mint));
+    for (const feat of zeros) {
+      if (kept.length === 100) break;
+      kept.push({ mint: feat.mint, micro: 0 });
+      named.add(feat.mint);
     }
     for (const row of kept) rows.push({ mint: row.mint, place: k + 1, micro: row.micro });
   }
@@ -486,28 +506,22 @@ function anchorLogCap(history: Mark[]): number {
  * that the cap keeps multiplying. A long horizon also pulls the mean back toward
  * the recent top of the chart, and the sd grows with the square root of time.
  */
-function sizeMeanSd(series: Array<{ t: number; logCap: number }>, horizonHours: number, anchor: number): { mean: number; sd: number } {
-  if (series.length === 0) return { mean: anchor, sd: 0.75 };
+function sizeMeanSd(series: Array<{ t: number; logCap: number }>, horizonHours: number, anchor: number): { mean: number; sd: number; wide: number } {
+  if (series.length === 0) return { mean: anchor, sd: 0.45, wide: 0.55 };
   const last = series[series.length - 1]!;
-  const memoryMs = 50 * 60 * 1000;
-  let weightSum = 0;
-  let weighted = 0;
-  for (const point of series) {
-    const w = Math.exp(-(last.t - point.t) / memoryMs);
-    weightSum += w;
-    weighted += w * point.logCap;
-  }
-  const level = 0.7 * last.logCap + 0.3 * (weighted / weightSum);
+  const prev = series.length >= 2 ? series[series.length - 2]! : last;
+  const level = 0.8 * last.logCap + 0.2 * prev.logCap;
   let driftPerHour = 0;
-  const window = series.slice(-7);
-  if (window.length >= 2) {
-    const t0 = window[0]!.t;
+  const window = series.filter((point) => last.t - point.t <= 45 * 60 * 1000);
+  const fit = window.length >= 2 ? window : series.slice(-4);
+  if (fit.length >= 2) {
+    const t0 = fit[0]!.t;
     let n = 0;
     let sx = 0;
     let sy = 0;
     let sxx = 0;
     let sxy = 0;
-    for (const point of window) {
+    for (const point of fit) {
       const x = (point.t - t0) / 3_600_000;
       n += 1;
       sx += x;
@@ -517,22 +531,26 @@ function sizeMeanSd(series: Array<{ t: number; logCap: number }>, horizonHours: 
     }
     const den = n * sxx - sx * sx;
     const slope = Math.abs(den) > 1e-9 ? (n * sxy - sx * sy) / den : 0;
-    driftPerHour = (Number.isFinite(slope) ? slope : 0) * (n / (n + 8));
+    driftPerHour = (Number.isFinite(slope) ? slope : 0) * (n / (n + 3));
   }
-  let integrated = driftPerHour * (1 - Math.exp(-horizonHours));
-  if (integrated > 0.4) integrated = 0.4;
-  if (integrated < -0.4) integrated = -0.4;
-  const pull = 1 - Math.exp(-horizonHours / 6);
-  const mean = (1 - 0.4 * pull) * (level + integrated) + 0.4 * pull * anchor;
-  const sd = Math.sqrt(0.32 ** 2 + 0.18 ** 2 * horizonHours + (0.5 * integrated) ** 2);
-  return { mean, sd: Math.max(0.32, sd) };
+  if (driftPerHour > 1.5) driftPerHour = 1.5;
+  if (driftPerHour < -1.2) driftPerHour = -1.2;
+  // The opening ramp does not run for the whole day. Most of it is in by a couple of hours.
+  let integrated = driftPerHour * (1 - Math.exp(-horizonHours / 1.5));
+  if (integrated > 0.55) integrated = 0.55;
+  if (integrated < -0.35) integrated = -0.35;
+  const pull = 1 - Math.exp(-horizonHours / 10);
+  const mean = (1 - 0.25 * pull) * (level + integrated) + 0.25 * pull * anchor;
+  const sd = Math.sqrt(0.16 ** 2 + 0.1 ** 2 * horizonHours);
+  const wide = 0.12 + 0.5 * (1 - Math.exp(-horizonHours / 5));
+  return { mean, sd: Math.max(0.16, sd), wide };
 }
 
-/** 72% of the mass at the fitted sd, 28% in a tail 2.2 times wider, so a miss is not the floor. */
-function binMass(lo: number, hi: number, mean: number, sd: number): number {
+/** Core mass at the fitted sd, plus a wider component that grows with the horizon. */
+function binMass(lo: number, hi: number, mean: number, sd: number, wide: number): number {
   const narrow = above(lo, mean, sd) - above(hi, mean, sd);
-  const wide = above(lo, mean, sd * 2.2) - above(hi, mean, sd * 2.2);
-  return 0.72 * narrow + 0.28 * wide;
+  const tail = above(lo, mean, sd * 2.6) - above(hi, mean, sd * 2.6);
+  return (1 - wide) * narrow + wide * tail;
 }
 
 function sizeRows(history: Mark[], binEdges: number[], horizonList: number[], nPlaces: number): Array<{ place: number; bin: number; p: number }> {
@@ -544,13 +562,13 @@ function sizeRows(history: Mark[], binEdges: number[], horizonList: number[], nP
     const series = rankSeries(history, place);
     const acc = new Array<number>(binEdges.length + 1).fill(0);
     for (let h = 0; h < horizonList.length; h++) {
-      let { mean, sd } = sizeMeanSd(series, horizonList[h]!, anchor);
-      if (mean > meanCap[h]!) mean = meanCap[h]!;
-      meanCap[h] = mean;
+      let fitted = sizeMeanSd(series, horizonList[h]!, anchor);
+      if (fitted.mean > meanCap[h]!) fitted = { ...fitted, mean: meanCap[h]! };
+      meanCap[h] = fitted.mean;
       for (let bin = 0; bin <= binEdges.length; bin++) {
         const lo = bin === 0 ? Number.NEGATIVE_INFINITY : binEdges[bin - 1]!;
         const hi = bin === binEdges.length ? Number.POSITIVE_INFINITY : binEdges[bin]!;
-        acc[bin] = (acc[bin] ?? 0) + binMass(lo, hi, mean, sd);
+        acc[bin] = (acc[bin] ?? 0) + binMass(lo, hi, fitted.mean, fitted.sd, fitted.wide);
       }
     }
     const reads = horizonList.length;

@@ -280,15 +280,19 @@ function featurize(coin: Coin, anchor: number): Feat {
   const staleHours = Math.max(0, (anchor - last.t) / 3_600_000);
   const collapsed = last.quote < 0.25;
   const dead = last.quote < 1.5 && last.venue !== 'pool';
+  // The chart replaces its leader every few marks. Current rank and youth
+  // outweigh a long stay in the top 10, which is how yesterday's #1 lingers.
   const quality =
     1.05 * logCap +
     0.75 * logQuote +
     1.45 * venueScore +
-    1.15 * persist10 +
-    0.35 * persist20 +
+    0.55 * persist10 +
+    0.2 * persist20 +
     0.22 * momentum +
     1.05 * drawdown +
-    0.08 * Math.min(obs.length, 5) -
+    0.08 * Math.min(obs.length, 5) +
+    1.15 * Math.exp(-(last.rank - 1) / 3) -
+    0.45 * Math.min(ageHours, 4) -
     (collapsed ? 4 : dead ? 1.8 : 0) -
     0.35 * staleHours;
   let halfLife =
@@ -303,6 +307,7 @@ function featurize(coin: Coin, anchor: number): Feat {
   if (drawdown < -0.35) halfLife *= 0.4;
   if (obs.length === 1 && ageHours < 0.2) halfLife *= 0.72;
   halfLife *= Math.exp(-0.25 * staleHours);
+  halfLife *= Math.exp(-0.55 * Math.min(ageHours, 3));
   return {
     mint: coin.mint,
     quality,
@@ -397,8 +402,8 @@ function probabilityRows(
     // spare name slots on coins that are on the recent chart but are not a real
     // top-5 threat, and leave the residue for newcomers.
     const zeros = extras
-      .filter((f) => !named.has(f.mint) && (f.rank > 8 || f.collapsed || f.staleHours > 1.5))
-      .sort((a, b) => a.rank - b.rank || compareMint(a.mint, b.mint));
+      .filter((f) => !named.has(f.mint) && (f.rank > 20 || f.collapsed || f.staleHours > 0.4))
+      .sort((a, b) => b.rank - a.rank || compareMint(a.mint, b.mint));
     for (const feat of zeros) {
       if (kept.length === 100) break;
       kept.push({ mint: feat.mint, micro: 0 });
@@ -501,19 +506,18 @@ function anchorLogCap(history: Mark[]): number {
 }
 
 /**
- * Mean and sd of log10(cap in SOL) at one horizon. The slope uses only the last
- * hour of marks, then shrinks toward zero: the opening ramp is not a forecast
- * that the cap keeps multiplying. A long horizon also pulls the mean back toward
- * the recent top of the chart, and the sd grows with the square root of time.
+ * Mean, sd, tail weight and right-jump weight of log10(cap in SOL) at one horizon.
+ * The slope uses the last hour of marks. Under 2.5 hours it keeps a shrinking
+ * share of that pace, which is the practice window. Longer horizons saturate.
  */
-function sizeMeanSd(series: Array<{ t: number; logCap: number }>, horizonHours: number, anchor: number): { mean: number; sd: number; wide: number } {
-  if (series.length === 0) return { mean: anchor, sd: 0.45, wide: 0.55 };
+function sizeMeanSd(series: Array<{ t: number; logCap: number }>, horizonHours: number, anchor: number): { mean: number; sd: number; wide: number; jump: number } {
+  if (series.length === 0) return { mean: anchor, sd: 0.5, wide: 0.4, jump: 0.25 };
   const last = series[series.length - 1]!;
   const prev = series.length >= 2 ? series[series.length - 2]! : last;
-  const level = 0.8 * last.logCap + 0.2 * prev.logCap;
+  const level = 0.85 * last.logCap + 0.15 * prev.logCap;
   let driftPerHour = 0;
-  const window = series.filter((point) => last.t - point.t <= 45 * 60 * 1000);
-  const fit = window.length >= 2 ? window : series.slice(-4);
+  const window = series.filter((point) => last.t - point.t <= 50 * 60 * 1000);
+  const fit = window.length >= 2 ? window : series.slice(-6);
   if (fit.length >= 2) {
     const t0 = fit[0]!.t;
     let n = 0;
@@ -531,26 +535,33 @@ function sizeMeanSd(series: Array<{ t: number; logCap: number }>, horizonHours: 
     }
     const den = n * sxx - sx * sx;
     const slope = Math.abs(den) > 1e-9 ? (n * sxy - sx * sy) / den : 0;
-    driftPerHour = (Number.isFinite(slope) ? slope : 0) * (n / (n + 3));
+    driftPerHour = (Number.isFinite(slope) ? slope : 0) * (n / (n + 1.5));
   }
-  if (driftPerHour > 1.5) driftPerHour = 1.5;
-  if (driftPerHour < -1.2) driftPerHour = -1.2;
-  // The opening ramp does not run for the whole day. Most of it is in by a couple of hours.
-  let integrated = driftPerHour * (1 - Math.exp(-horizonHours / 1.5));
-  if (integrated > 0.55) integrated = 0.55;
-  if (integrated < -0.35) integrated = -0.35;
-  const pull = 1 - Math.exp(-horizonHours / 10);
-  const mean = (1 - 0.25 * pull) * (level + integrated) + 0.25 * pull * anchor;
-  const sd = Math.sqrt(0.16 ** 2 + 0.1 ** 2 * horizonHours);
-  const wide = 0.12 + 0.5 * (1 - Math.exp(-horizonHours / 5));
-  return { mean, sd: Math.max(0.16, sd), wide };
+  if (driftPerHour > 1.6) driftPerHour = 1.6;
+  if (driftPerHour < -0.8) driftPerHour = -0.8;
+  // The practice window is under two hours and the cap is still climbing.
+  // A long final horizon saturates instead of compounding the opening ramp.
+  const integrated =
+    horizonHours < 2.5 ? (driftPerHour * horizonHours) / (1 + horizonHours / 2.2) : driftPerHour * (1 - Math.exp(-horizonHours / 2));
+  const pull = 1 - Math.exp(-horizonHours / 14);
+  const mean = (1 - 0.15 * pull) * (level + integrated) + 0.15 * pull * anchor;
+  const sd = Math.sqrt(0.2 ** 2 + 0.14 ** 2 * horizonHours);
+  const wide = 0.28 + 0.22 * (1 - Math.exp(-horizonHours / 2));
+  const jump = 0.18 + 0.22 * (1 - Math.exp(-horizonHours / 1.1));
+  return { mean, sd: Math.max(0.2, sd), wide, jump };
 }
 
-/** Core mass at the fitted sd, plus a wider component that grows with the horizon. */
-function binMass(lo: number, hi: number, mean: number, sd: number, wide: number): number {
+/**
+ * Three pieces, averaged over the answer reads: a core on the projected cap,
+ * a wide band for a coin that replaces this place, and a right-hand jump for
+ * a new leader that prints a higher cap than the last mark's.
+ */
+function binMass(lo: number, hi: number, mean: number, sd: number, wide: number, jump: number): number {
   const narrow = above(lo, mean, sd) - above(hi, mean, sd);
-  const tail = above(lo, mean, sd * 2.6) - above(hi, mean, sd * 2.6);
-  return (1 - wide) * narrow + wide * tail;
+  const tail = above(lo, mean, sd * 2.2) - above(hi, mean, sd * 2.2);
+  const right = above(lo, mean + 0.32, sd * 1.7) - above(hi, mean + 0.32, sd * 1.7);
+  const core = Math.max(0, 1 - wide - jump);
+  return core * narrow + wide * tail + jump * right;
 }
 
 function sizeRows(history: Mark[], binEdges: number[], horizonList: number[], nPlaces: number): Array<{ place: number; bin: number; p: number }> {
@@ -563,12 +574,14 @@ function sizeRows(history: Mark[], binEdges: number[], horizonList: number[], nP
     const acc = new Array<number>(binEdges.length + 1).fill(0);
     for (let h = 0; h < horizonList.length; h++) {
       let fitted = sizeMeanSd(series, horizonList[h]!, anchor);
-      if (fitted.mean > meanCap[h]!) fitted = { ...fitted, mean: meanCap[h]! };
-      meanCap[h] = fitted.mean;
+      const gap = 0.04 * (place - 1);
+      if (fitted.mean > meanCap[h]! - gap) fitted = { ...fitted, mean: meanCap[h]! - gap };
+      meanCap[h] = fitted.mean + gap;
+      const jump = place === 1 ? fitted.jump : fitted.jump * 0.45;
       for (let bin = 0; bin <= binEdges.length; bin++) {
         const lo = bin === 0 ? Number.NEGATIVE_INFINITY : binEdges[bin - 1]!;
         const hi = bin === binEdges.length ? Number.POSITIVE_INFINITY : binEdges[bin]!;
-        acc[bin] = (acc[bin] ?? 0) + binMass(lo, hi, fitted.mean, fitted.sd, fitted.wide);
+        acc[bin] = (acc[bin] ?? 0) + binMass(lo, hi, fitted.mean, fitted.sd, fitted.wide, jump);
       }
     }
     const reads = horizonList.length;
